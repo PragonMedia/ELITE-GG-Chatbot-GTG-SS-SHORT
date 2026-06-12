@@ -92,7 +92,7 @@ if (isset($_GET['phoneNumber']) && $_GET['phoneNumber'] !== '') {
   if (!empty($domain) && !empty($route)) {
     error_log("API Request - Fetching phoneNumber for domain: " . $domain . ", route: " . $route);
     $apiData = fetchRouteData($domain, $route);
-
+    
     if ($apiData && isset($apiData['success']) && $apiData['success']) {
       if (isset($apiData['routeData']['phoneNumber'])) {
         $phoneNumber = $apiData['routeData']['phoneNumber'];
@@ -102,7 +102,7 @@ if (isset($_GET['phoneNumber']) && $_GET['phoneNumber'] !== '') {
       } else {
         error_log("⚠️ API Response - phoneNumber not in response, using fallback: " . $phoneNumber);
       }
-
+      
       // Log complete API response for debugging
       error_log("API Response - Complete data: " . json_encode([
         'success' => $apiData['success'] ?? false,

@@ -20,38 +20,84 @@ function preserveUrlParams(url) {
   return url;
 }
 
-// Reactive phone number update function
-// Called when phone button (msg17) is about to be shown
-// Updates phone number if API data is available, or waits briefly for it
-async function updatePhoneNumberReactive() {
-  // If phone number data is already available, update immediately
-  if (window.phoneNumberData && window.updatePhoneNumberInDOM) {
-    window.updatePhoneNumberInDOM(
-      window.phoneNumberData.phone_number,
-      window.phoneNumberData.formatted_number
-    );
-    return;
+// Show loader on phone button (called before fetching number.php)
+function setPhoneButtonLoading(loading) {
+  const link = document.getElementById("phone-number");
+  const textEl = document.getElementById("phone_retreaver");
+  if (!link || !textEl) return;
+  if (loading) {
+    link.classList.add("phone-number-loading");
+    link.href = "javascript:void(0)";
+    link.style.pointerEvents = "none";
+    textEl.textContent = "Loading...";
+  } else {
+    link.classList.remove("phone-number-loading");
+    link.style.pointerEvents = "";
   }
+}
 
-  // If promise exists but hasn't resolved yet, wait for it (with timeout)
-  if (window.phoneNumberPromise) {
-    try {
-      // Wait up to 300ms for the promise to resolve
-      await Promise.race([
-        window.phoneNumberPromise,
-        new Promise((resolve) => setTimeout(resolve, 300)),
-      ]);
+// Reactive phone number update - called ONLY when we are about to show the phone step (qualified users).
+// 1) Get publisher number from number.php and set href (so Ringba knows who to associate with).
+// 2) Then load Ringba (only after href is set).
+// 3) Only enable the phone button when BOTH number.php is done AND Ringba script has loaded.
+async function updatePhoneNumberReactive() {
+  if (!window.updatePhoneNumberInDOM) return;
 
-      // If data is now available, update it
-      if (window.phoneNumberData && window.updatePhoneNumberInDOM) {
-        window.updatePhoneNumberInDOM(
-          window.phoneNumberData.phone_number,
-          window.phoneNumberData.formatted_number
-        );
-      }
-    } catch (error) {
-      console.error("Error in reactive phone number update:", error);
+  const link = document.getElementById("phone-number");
+  const textEl = document.getElementById("phone_retreaver");
+  if (!link || !textEl) return;
+
+  // Loader only: don't set any number until number.php and Ringba are done (avoids visible "replace" on frontend).
+  setPhoneButtonLoading(true);
+
+  try {
+    let url = "./number.php";
+    if (
+      window.domainRouteData &&
+      window.domainRouteData.routeData &&
+      window.domainRouteData.routeData.phoneNumber
+    ) {
+      const raw = String(window.domainRouteData.routeData.phoneNumber).replace(
+        /\D/g,
+        "",
+      );
+      url += "?phoneNumber=" + encodeURIComponent(raw);
     }
+    const response = await fetch(url, {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    const data = response.ok ? await response.json() : null;
+    if (data && data.success && data.phone_number) {
+      const raw = String(data.phone_number).replace(/\D/g, "");
+      const formatted =
+        data.formatted_number ||
+        (raw.length >= 11
+          ? "+1 (" +
+            raw.slice(1, 4) +
+            ") " +
+            raw.slice(4, 7) +
+            "-" +
+            raw.slice(7, 11)
+          : raw);
+      window.updatePhoneNumberInDOM(raw, formatted);
+      window.phoneNumberData = {
+        phone_number: raw,
+        formatted_number: formatted,
+      };
+    }
+
+    // Ringba must see the publisher number (href) before we load their script. Href is now set above.
+    // Load Ringba and wait for script to load before enabling the button.
+    await loadRingba();
+  } catch (error) {
+    console.error(
+      "Error fetching phone number or loading Ringba (qualified step):",
+      error,
+    );
+  } finally {
+    setPhoneButtonLoading(false);
   }
 }
 
@@ -81,7 +127,7 @@ async function fetchRouteData(domain, route) {
 
   try {
     const apiUrl = `/api/v1/domain-route-details?domain=${encodeURIComponent(
-      domain
+      domain,
     )}&route=${encodeURIComponent(route)}`;
     const response = await fetch(apiUrl, {
       method: "GET",
@@ -105,55 +151,62 @@ async function fetchRouteData(domain, route) {
 // Global variable to store ringbaID
 let ringbaID = "CA96589cff1d5d4fa48f459da7dbd3a728"; // Fallback default
 
-// Fetch route data on page load
+// Fetch route data on page load (saved for phone number when qualified - number.php is NOT called on load)
 (async function initRingbaID() {
-  // OPTIMIZATION: Use routeConfig from single API call (set in index.html)
-  // Wait a bit for routeConfig to be available
-  let attempts = 0;
-  const maxAttempts = 10;
-  
-  while (!window.routeConfig && attempts < maxAttempts) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-    attempts++;
-  }
+  // Use the function to get domain and route from URL
+  const { domain, route } = getDomainAndRoute();
 
-  if (window.routeConfig && window.routeConfig.ringbaID) {
-    ringbaID = window.routeConfig.ringbaID;
-    console.log("ringbaID from route config (single API call):", ringbaID);
-  } else {
-    // Fallback: Use the function to get domain and route from URL and fetch from API
-    const { domain, route } = getDomainAndRoute();
+  if (domain && route) {
+    const apiData = await fetchRouteData(domain, route);
 
-    if (domain && route) {
-      const apiData = await fetchRouteData(domain, route);
-
-      if (apiData && apiData.success && apiData.routeData) {
-        // Log values from API
-        if (apiData.routeData.ringbaID) {
-          ringbaID = apiData.routeData.ringbaID;
-          console.log("ringbaID from API (fallback):", ringbaID);
-        } else {
-          console.log("ringbaID from fallback:", ringbaID);
-        }
+    if (apiData && apiData.success && apiData.routeData) {
+      // Save full route data for use when we show phone step (qualified users only)
+      window.domainRouteData = apiData;
+      if (apiData.routeData.ringbaID) {
+        ringbaID = apiData.routeData.ringbaID;
+        console.log("ringbaID from API:", ringbaID);
       } else {
         console.log("ringbaID from fallback:", ringbaID);
       }
     } else {
       console.log("ringbaID from fallback:", ringbaID);
     }
+  } else {
+    console.log("ringbaID from fallback:", ringbaID);
   }
 })();
 
-// Load Ringba function - exactly as provided but as JavaScript function
+// Track Ringba trigger - POST to API when we trigger Ringba (domain required).
+function trackRingbaTrigger() {
+  const domain = (window.location.hostname || "").replace(/^www\./, "").trim();
+  if (!domain) return;
+  fetch("/api/v1/track/ringba-trigger", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ domain }),
+    credentials: "include",
+  }).catch((err) => console.error("Ringba trigger track error:", err));
+}
+
+// Load Ringba - returns a Promise that resolves when the script has loaded (so we only enable the phone button after Ringba is done).
 const loadRingba = () => {
-  var script = document.createElement("script");
-  script.src = `//b-js.ringba.com/${ringbaID}`;
-  let timeoutId = setTimeout(addRingbaTags, 1000);
-  script.onload = function () {
-    clearTimeout(timeoutId);
-    addRingbaTags();
-  };
-  document.head.appendChild(script);
+  trackRingbaTrigger();
+  return new Promise((resolve, reject) => {
+    if (document.querySelector('script[src*="b-js.ringba.com"]')) {
+      resolve();
+      return;
+    }
+    var script = document.createElement("script");
+    script.src = `//b-js.ringba.com/${ringbaID}`;
+    let timeoutId = setTimeout(addRingbaTags, 1000);
+    script.onload = function () {
+      clearTimeout(timeoutId);
+      addRingbaTags();
+      resolve();
+    };
+    script.onerror = () => reject(new Error("Ringba script failed to load"));
+    document.head.appendChild(script);
+  });
 };
 
 // Function to add tags - with age parameter and gtg added
@@ -240,7 +293,7 @@ function loadImages() {
   });
 }
 
-let speed = 500;
+let speed = 750;
 
 function updateAgeGroup(ageGroup) {
   let url = new URL(window.location.href);
@@ -262,10 +315,10 @@ let is_71plus = false;
 
 loadImages();
 
-setTimeout(function () {
+// Initial chat sequence: msg1 -> msg2 -> msg3 -> msg4 -> age buttons
+function runInitialSequence() {
   $("#initTyping").remove();
   $("#msg1").removeClass("hidden").after(typingEffect());
-  scrollToBottom();
   setTimeout(function () {
     $(".temp-typing").remove();
     $("#msg2").removeClass("hidden").after(typingEffect());
@@ -276,18 +329,17 @@ setTimeout(function () {
       scrollToBottom();
       setTimeout(function () {
         $(".temp-typing").remove();
-        $("#msg_q2_2").removeClass("hidden").after(typingEffect());
+        $("#msg4").removeClass("hidden");
         scrollToBottom();
         setTimeout(function () {
-          $(".temp-typing").remove();
-          $("#agentBlock_q2").removeClass("hidden");
-          $("#msg_q2_3").removeClass("hidden");
+          $("#msg_age_buttons").removeClass("hidden");
           scrollToBottom();
         }, speed);
       }, speed);
     }, speed);
   }, speed);
-}, speed);
+}
+setTimeout(runInitialSequence, speed);
 
 var buttonValue;
 var currentStep;
@@ -296,10 +348,8 @@ $("button.chat-button").on("click", function () {
   currentStep = $(this).attr("data-form-step");
   buttonValue = $(this).attr("data-form-value");
 
-  // Step 0 and 1 removed - flow now goes directly to age selection
-
   if (currentStep == 2) {
-    $("#msg_q2_3").addClass("hidden");
+    $("#msg_age_buttons").addClass("hidden");
     $("#userBlock_q2").removeClass("hidden");
 
     var newUrl = new URL(window.location.href); // Define the URL once
@@ -414,7 +464,7 @@ $("button.chat-button").on("click", function () {
                     $("#msg17").removeClass("hidden");
                     scrollToBottom();
                     startCountdown();
-                  }, 500);
+                  }, 750);
                 }, speed);
               }, speed);
             }, speed);
@@ -454,7 +504,7 @@ $("button.chat-button").on("click", function () {
       const gtgValue = localStorage.getItem("gtg");
       if (gtgValue !== "1") {
         const claimNowIframeUrl = `https://policyfinds.com/sq1/claim-button.html?clickid=${encodeURIComponent(
-          clickID
+          clickID,
         )}&mb=${encodeURIComponent(mbParam)}`;
 
         // Set the src for the claim now iframe
@@ -465,86 +515,48 @@ $("button.chat-button").on("click", function () {
       }
     }
 
-    // Load Ringba and call addRingbaTags after qualification
-    setTimeout(() => {
-      loadRingba();
-    }, 100);
-    scrollToBottom();
-
-    setTimeout(function () {
-      $("#agentBlock4").removeClass("hidden");
+    // For both Medicare answers: run number.php/loadRingba before showing messages so final phone reveal timing is consistent.
+    (async function () {
+      if (buttonValue == "Yes" || buttonValue == "No") {
+        await updatePhoneNumberReactive();
+      }
       scrollToBottom();
+
       setTimeout(function () {
-        $(".temp-typing").remove();
-        $("#msg13").removeClass("hidden").after(typingEffect());
+        $("#agentBlock4").removeClass("hidden");
         scrollToBottom();
         setTimeout(function () {
           $(".temp-typing").remove();
-          $("#msg14").removeClass("hidden").after(typingEffect());
+          $("#msg13").removeClass("hidden").after(typingEffect());
           scrollToBottom();
           setTimeout(function () {
             $(".temp-typing").remove();
-            // Show different message based on Yes/No answer
-            if (buttonValue == "Yes") {
-              $("#msg15").removeClass("hidden").after(typingEffect());
-            } else if (buttonValue == "No") {
-              $("#msg15_no").removeClass("hidden").after(typingEffect());
-            }
+            $("#msg14").removeClass("hidden").after(typingEffect());
             scrollToBottom();
             setTimeout(function () {
               $(".temp-typing").remove();
-              // Show phone button for "Yes", CLAIM NOW button for "No"
               if (buttonValue == "Yes") {
+                $("#msg15").removeClass("hidden").after(typingEffect());
+              } else if (buttonValue == "No") {
+                $("#msg15_no").removeClass("hidden").after(typingEffect());
+              }
+              scrollToBottom();
+              setTimeout(function () {
+                $(".temp-typing").remove();
                 $("#msg17").before(typingEffect());
                 scrollToBottom();
                 setTimeout(function () {
                   $(".temp-typing").remove();
-                  // Update phone number reactively before showing button
-                  updatePhoneNumberReactive();
                   $("#msg17").removeClass("hidden");
                   scrollToBottom();
                   startCountdown();
-                }, 500);
-              } else if (buttonValue == "No") {
-                // Get gtg value from localStorage
-                const gtgValue = localStorage.getItem("gtg");
-
-                // If gtg is "1", show contact page button
-                // If gtg is "0" or null/undefined, show iframe button
-                if (gtgValue === "1") {
-                  // Show contact page button
-                  $("#msg19-contact").removeClass("hidden");
-                } else {
-                  // Show iframe button (gtg is "0" or null/undefined)
-                  const currentUrl = new URL(window.location.href);
-                  // Preserve all original parameters
-                  preserveUrlParams(currentUrl);
-                  const clickID =
-                    localStorage.getItem("rt_clickid") ||
-                    currentUrl.searchParams.get("clickid") ||
-                    "";
-                  const mbParam = currentUrl.searchParams.get("mb") || "";
-                  const claimNowIframeUrl = `https://policyfinds.com/sq1/claim-button.html?clickid=${encodeURIComponent(
-                    clickID
-                  )}&mb=${encodeURIComponent(mbParam)}`;
-
-                  // Set the src for the claim now iframe
-                  const claimNowIframe =
-                    document.getElementById("claim-now-iframe");
-                  if (claimNowIframe) {
-                    claimNowIframe.src = claimNowIframeUrl;
-                  }
-                  // Show the claim now container (inside chat bubble)
-                  $("#msg19").removeClass("hidden");
-                }
-                startCountdown();
-              }
-              scrollToBottom();
+                }, 750);
+              }, speed);
             }, speed);
           }, speed);
         }, speed);
       }, speed);
-    }, speed);
+    })();
 
     // Update the URL with the new qualified parameter
     window.history.replaceState({}, "", newUrl);
@@ -558,7 +570,7 @@ function scrollToBottom() {
       scrollTop:
         object.offset().top + object.outerHeight() - $(window).height(),
     },
-    "fast"
+    "fast",
   );
 }
 
